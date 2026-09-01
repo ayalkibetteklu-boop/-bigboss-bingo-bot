@@ -32,6 +32,7 @@ http.createServer((req, res) => {
   res.writeHead(200, {
     "Content-Type": "text/plain"
   });
+
   res.end("🎱 BigBoss Bingo Bot is running!");
 }).listen(PORT, () => {
   console.log(`🌐 Server running on port ${PORT}`);
@@ -128,6 +129,228 @@ function generateBingoCard() {
   }
 
   return card;
+}
+
+// ==================================================
+// FORMAT BINGO NUMBER
+// ==================================================
+
+function getBingoLetter(number) {
+  number = Number(number);
+
+  if (number >= 1 && number <= 15) return "B";
+  if (number >= 16 && number <= 30) return "I";
+  if (number >= 31 && number <= 45) return "N";
+  if (number >= 46 && number <= 60) return "G";
+  if (number >= 61 && number <= 75) return "O";
+
+  return "?";
+}
+
+// ==================================================
+// CHECK BINGO
+// ==================================================
+
+function checkBingo(cardData, calledNumbers) {
+  const called = new Set(
+    calledNumbers.map(number => Number(number))
+  );
+
+  const marked = cardData.map((row, rowIndex) =>
+    row.map((value, colIndex) => {
+      if (value === "FREE") return true;
+
+      return called.has(Number(value));
+    })
+  );
+
+  // Rows
+  for (let row = 0; row < 5; row++) {
+    if (marked[row].every(Boolean)) {
+      return true;
+    }
+  }
+
+  // Columns
+  for (let col = 0; col < 5; col++) {
+    let complete = true;
+
+    for (let row = 0; row < 5; row++) {
+      if (!marked[row][col]) {
+        complete = false;
+        break;
+      }
+    }
+
+    if (complete) {
+      return true;
+    }
+  }
+
+  // Main diagonal
+  let diagonal1 = true;
+
+  for (let i = 0; i < 5; i++) {
+    if (!marked[i][i]) {
+      diagonal1 = false;
+      break;
+    }
+  }
+
+  if (diagonal1) {
+    return true;
+  }
+
+  // Second diagonal
+  let diagonal2 = true;
+
+  for (let i = 0; i < 5; i++) {
+    if (!marked[i][4 - i]) {
+      diagonal2 = false;
+      break;
+    }
+  }
+
+  return diagonal2;
+}
+
+// ==================================================
+// MARK CARD FOR DISPLAY
+// ==================================================
+
+function formatCard(cardData, calledNumbers) {
+  const called = new Set(
+    calledNumbers.map(number => Number(number))
+  );
+
+  return cardData
+    .map(row => {
+      return row
+        .map(value => {
+          if (value === "FREE") {
+            return "🆓";
+          }
+
+          if (called.has(Number(value))) {
+            return `✅${value}`;
+          }
+
+          return String(value);
+        })
+        .join(" | ");
+    })
+    .join("\n");
+}
+
+// ==================================================
+// CHECK ALL PLAYERS FOR BINGO
+// ==================================================
+
+async function checkAllPlayersForBingo(gameId) {
+  const { data: gamePlayers, error: playersError } = await supabase
+    .from("game_players")
+    .select("player_id")
+    .eq("game_id", gameId);
+
+  if (playersError) {
+    console.error("Game players error:", playersError);
+    return null;
+  }
+
+  if (!gamePlayers || gamePlayers.length === 0) {
+    return null;
+  }
+
+  const { data: calledRows, error: calledError } = await supabase
+    .from("called_numbers")
+    .select("number")
+    .eq("game_id", gameId);
+
+  if (calledError) {
+    console.error("Called numbers error:", calledError);
+    return null;
+  }
+
+  const calledNumbers =
+    (calledRows || []).map(item => Number(item.number));
+
+  for (const gamePlayer of gamePlayers) {
+    const { data: card, error: cardError } = await supabase
+      .from("cards")
+      .select("*")
+      .eq("game_id", gameId)
+      .eq("player_id", gamePlayer.player_id)
+      .order("id", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (cardError || !card) {
+      continue;
+    }
+
+    if (checkBingo(card.card_data, calledNumbers)) {
+      return {
+        playerId: gamePlayer.player_id,
+        cardId: card.id
+      };
+    }
+  }
+
+  return null;
+}
+
+// ==================================================
+// ANNOUNCE WINNER
+// ==================================================
+
+async function announceWinner(gameId, playerId, cardId) {
+  const { data: existingWinner } = await supabase
+    .from("winners")
+    .select("*")
+    .eq("game_id", gameId)
+    .eq("player_id", playerId)
+    .maybeSingle();
+
+  if (!existingWinner) {
+    const { error } = await supabase
+      .from("winners")
+      .insert({
+        game_id: gameId,
+        player_id: playerId,
+        card_id: cardId
+      });
+
+    if (error) {
+      console.error("Winner insert error:", error);
+    }
+  }
+
+  const { data: player } = await supabase
+    .from("players")
+    .select("telegram_id, first_name")
+    .eq("id", playerId)
+    .maybeSingle();
+
+  if (player?.telegram_id) {
+    await bot.sendMessage(
+      player.telegram_id,
+      `🏆 *BINGO!*\n\n` +
+      `🎉 Congratulations ${player.first_name || "Player"}!\n\n` +
+      `You won Game #${gameId}!`,
+      {
+        parse_mode: "Markdown"
+      }
+    );
+  }
+
+  await supabase
+    .from("games")
+    .update({
+      status: "ended"
+    })
+    .eq("id", gameId);
+
+  return true;
 }
 
 // ==================================================
@@ -298,6 +521,7 @@ bot.on("callback_query", async (query) => {
 
       if (error) {
         console.error(error);
+
         await bot.sendMessage(
           chatId,
           "❌ Could not load games."
@@ -396,15 +620,15 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      const { error } = await supabase
+      const { error: joinError } = await supabase
         .from("game_players")
         .insert({
           game_id: gameId,
           player_id: player.id
         });
 
-      if (error) {
-        console.error(error);
+      if (joinError) {
+        console.error(joinError);
 
         await bot.sendMessage(
           chatId,
@@ -413,7 +637,7 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      // Generate card
+      // Generate and save card
       const cardData = generateBingoCard();
 
       const { error: cardError } = await supabase
@@ -425,7 +649,20 @@ bot.on("callback_query", async (query) => {
         });
 
       if (cardError) {
-        console.error(cardError);
+        console.error("Card insert error:", cardError);
+
+        // Remove player from game if card creation failed
+        await supabase
+          .from("game_players")
+          .delete()
+          .eq("game_id", gameId)
+          .eq("player_id", player.id);
+
+        await bot.sendMessage(
+          chatId,
+          "❌ Could not create your Bingo card."
+        );
+        return;
       }
 
       await bot.sendMessage(
@@ -466,15 +703,27 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      const rows = card.card_data
-        .map(row => row.join(" | "))
-        .join("\n");
+      const { data: calledRows } = await supabase
+        .from("called_numbers")
+        .select("number")
+        .eq("game_id", card.game_id);
+
+      const calledNumbers =
+        (calledRows || []).map(item => Number(item.number));
+
+      const rows = formatCard(
+        card.card_data,
+        calledNumbers
+      );
 
       await bot.sendMessage(
         chatId,
         `🃏 *YOUR BINGO CARD*\n\n` +
         `B   I   N   G   O\n\n` +
-        rows,
+        rows +
+        `\n\n` +
+        `🟢 = Called number\n` +
+        `🆓 = FREE`,
         {
           parse_mode: "Markdown"
         }
@@ -676,12 +925,22 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      await supabase
+      const { error } = await supabase
         .from("games")
         .update({
           status: "paused"
         })
         .eq("id", game.id);
+
+      if (error) {
+        console.error(error);
+
+        await bot.sendMessage(
+          chatId,
+          "❌ Could not pause game."
+        );
+        return;
+      }
 
       await bot.sendMessage(
         chatId,
@@ -754,12 +1013,7 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      let letter = "B";
-
-      if (number >= 16 && number <= 30) letter = "I";
-      if (number >= 31 && number <= 45) letter = "N";
-      if (number >= 46 && number <= 60) letter = "G";
-      if (number >= 61 && number <= 75) letter = "O";
+      const letter = getBingoLetter(number);
 
       await bot.sendMessage(
         chatId,
@@ -768,6 +1022,28 @@ bot.on("callback_query", async (query) => {
           parse_mode: "Markdown"
         }
       );
+
+      // Check for Bingo after every called number
+      const winner = await checkAllPlayersForBingo(game.id);
+
+      if (winner) {
+        await announceWinner(
+          game.id,
+          winner.playerId,
+          winner.cardId
+        );
+
+        await bot.sendMessage(
+          chatId,
+          `🏆 *BINGO WINNER FOUND!*\n\n` +
+          `👤 Player ID: ${winner.playerId}\n` +
+          `🎮 Game #${game.id}\n\n` +
+          `🛑 Game automatically ended.`,
+          {
+            parse_mode: "Markdown"
+          }
+        );
+      }
 
       return;
     }
@@ -843,12 +1119,22 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      await supabase
+      const { error } = await supabase
         .from("games")
         .update({
           status: "ended"
         })
         .eq("id", game.id);
+
+      if (error) {
+        console.error(error);
+
+        await bot.sendMessage(
+          chatId,
+          "❌ Could not end game."
+        );
+        return;
+      }
 
       await bot.sendMessage(
         chatId,
@@ -860,7 +1146,6 @@ bot.on("callback_query", async (query) => {
 
       return;
     }
-
   } catch (error) {
     console.error("❌ Callback error:", error);
 
