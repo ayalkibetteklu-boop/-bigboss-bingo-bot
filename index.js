@@ -26,17 +26,12 @@ const bot = new TelegramBot(token, {
   polling: true
 });
 
-// ================================
-// RENDER SERVER
-// ================================
-
 const PORT = process.env.PORT || 10000;
 
 http.createServer((req, res) => {
   res.writeHead(200, {
     "Content-Type": "text/plain"
   });
-
   res.end("🎱 BigBoss Bingo Bot is running!");
 }).listen(PORT, () => {
   console.log(`🌐 Server running on port ${PORT}`);
@@ -44,72 +39,116 @@ http.createServer((req, res) => {
 
 console.log("🎱 BigBoss Bingo Bot is running...");
 
-// ================================
-// PLAYER REGISTRATION
-// ================================
+// ==================================================
+// REGISTER PLAYER
+// ==================================================
 
-async function registerPlayer(msg) {
-  const telegramId = String(msg.from.id);
-  const username = msg.from.username || null;
-  const firstName = msg.from.first_name || "Player";
+async function registerPlayer(user) {
+  const telegramId = String(user.id);
+  const username = user.username || null;
+  const firstName = user.first_name || "Player";
 
-  const { data: existingPlayer, error: findError } =
-    await supabase
-      .from("players")
-      .select("*")
-      .eq("telegram_id", telegramId)
-      .maybeSingle();
+  const { data: existing, error: findError } = await supabase
+    .from("players")
+    .select("*")
+    .eq("telegram_id", telegramId)
+    .maybeSingle();
 
   if (findError) {
     console.error("Player lookup error:", findError);
     return null;
   }
 
-  if (existingPlayer) {
-    return existingPlayer;
+  if (existing) {
+    return existing;
   }
 
-  const { data: newPlayer, error: insertError } =
-    await supabase
-      .from("players")
-      .insert({
-        telegram_id: telegramId,
-        username: username,
-        first_name: firstName
-      })
-      .select()
-      .single();
+  const { data: player, error } = await supabase
+    .from("players")
+    .insert({
+      telegram_id: telegramId,
+      username,
+      first_name: firstName
+    })
+    .select()
+    .single();
 
-  if (insertError) {
-    console.error("Player registration error:", insertError);
+  if (error) {
+    console.error("Player insert error:", error);
     return null;
   }
 
-  // Create wallet
   await supabase
     .from("wallets")
     .insert({
-      player_id: newPlayer.id,
+      player_id: player.id,
       balance: 0
     });
 
-  return newPlayer;
+  return player;
 }
 
-// ================================
-// START
-// ================================
+// ==================================================
+// GENERATE BINGO CARD
+// ==================================================
+
+function generateBingoCard() {
+  const columns = [
+    [1, 15],
+    [16, 30],
+    [31, 45],
+    [46, 60],
+    [61, 75]
+  ];
+
+  const card = [];
+
+  for (let row = 0; row < 5; row++) {
+    card.push([]);
+
+    for (let col = 0; col < 5; col++) {
+      if (row === 2 && col === 2) {
+        card[row].push("FREE");
+        continue;
+      }
+
+      const [min, max] = columns[col];
+
+      let number;
+
+      do {
+        number =
+          Math.floor(Math.random() * (max - min + 1)) + min;
+      } while (
+        card.some(rowData => rowData.includes(number))
+      );
+
+      card[row].push(number);
+    }
+  }
+
+  return card;
+}
+
+// ==================================================
+// /START
+// ==================================================
 
 bot.onText(/\/start/, async (msg) => {
-  const chatId = msg.chat.id;
-  const firstName = msg.from.first_name || "Player";
+  const player = await registerPlayer(msg.from);
 
-  await registerPlayer(msg);
+  if (!player) {
+    await bot.sendMessage(
+      msg.chat.id,
+      "❌ Registration failed. Please try again."
+    );
+    return;
+  }
 
   await bot.sendMessage(
-    chatId,
+    msg.chat.id,
     `🎱 *Welcome to BigBoss Bingo!*\n\n` +
-    `Hello ${firstName} 👋\n\n` +
+    `Hello ${msg.from.first_name || "Player"} 👋\n\n` +
     `Choose an option below:`,
     {
       parse_mode: "Markdown",
@@ -143,9 +182,9 @@ bot.onText(/\/start/, async (msg) => {
   );
 });
 
-// ================================
-// MY ID
-// ================================
+// ==================================================
+// /MYID
+// ==================================================
 
 bot.onText(/\/myid/, async (msg) => {
   await bot.sendMessage(
@@ -157,26 +196,24 @@ bot.onText(/\/myid/, async (msg) => {
   );
 });
 
-// ================================
-// ADMIN PANEL
-// ================================
+// ==================================================
+// /ADMIN
+// ==================================================
 
 bot.onText(/\/admin/, async (msg) => {
-  const chatId = msg.chat.id;
-
   if (
     !ADMIN_ID ||
     String(msg.from.id) !== String(ADMIN_ID)
   ) {
     await bot.sendMessage(
-      chatId,
+      msg.chat.id,
       "⛔ You are not authorized to access the Admin Panel."
     );
     return;
   }
 
   await bot.sendMessage(
-    chatId,
+    msg.chat.id,
     `👑 *AYU BINGO ADMIN CONTROL CENTER*\n\nChoose an action:`,
     {
       parse_mode: "Markdown",
@@ -226,9 +263,9 @@ bot.onText(/\/admin/, async (msg) => {
   );
 });
 
-// ================================
+// ==================================================
 // CALLBACK BUTTONS
-// ================================
+// ==================================================
 
 bot.on("callback_query", async (query) => {
   try {
@@ -237,32 +274,30 @@ bot.on("callback_query", async (query) => {
 
     await bot.answerCallbackQuery(query.id);
 
-    // ============================
-    // PLAYER - JOIN GAME
-    // ============================
+    // ==================================================
+    // JOIN GAME
+    // ==================================================
 
     if (action === "join_game") {
-      const player = await registerPlayer(query);
+      const player = await registerPlayer(query.from);
 
       if (!player) {
         await bot.sendMessage(
           chatId,
-          "❌ Could not register player."
+          "❌ Player registration failed."
         );
         return;
       }
 
-      const { data: games, error } =
-        await supabase
-          .from("games")
-          .select("*")
-          .in("status", ["waiting", "active"])
-          .order("id", { ascending: false })
-          .limit(1);
+      const { data: games, error } = await supabase
+        .from("games")
+        .select("*")
+        .in("status", ["waiting", "active"])
+        .order("id", { ascending: false })
+        .limit(1);
 
       if (error) {
         console.error(error);
-
         await bot.sendMessage(
           chatId,
           "❌ Could not load games."
@@ -296,7 +331,7 @@ bot.on("callback_query", async (query) => {
               [
                 {
                   text: "✅ Join",
-                  callback_data: `join_${game.id}`
+                  callback_data: `join_game_${game.id}`
                 }
               ]
             ]
@@ -307,14 +342,14 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    // ============================
-    // ACTUAL JOIN
-    // ============================
+    // ==================================================
+    // JOIN SPECIFIC GAME
+    // ==================================================
 
-    if (action.startsWith("join_")) {
-      const gameId = action.replace("join_", "");
+    if (action.startsWith("join_game_")) {
+      const gameId = action.replace("join_game_", "");
 
-      const player = await registerPlayer(query);
+      const player = await registerPlayer(query.from);
 
       if (!player) {
         await bot.sendMessage(
@@ -324,13 +359,12 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      const { data: existing } =
-        await supabase
-          .from("game_players")
-          .select("*")
-          .eq("game_id", gameId)
-          .eq("player_id", player.id)
-          .maybeSingle();
+      const { data: existing } = await supabase
+        .from("game_players")
+        .select("*")
+        .eq("game_id", gameId)
+        .eq("player_id", player.id)
+        .maybeSingle();
 
       if (existing) {
         await bot.sendMessage(
@@ -340,16 +374,37 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      const { error } =
-        await supabase
-          .from("game_players")
-          .insert({
-            game_id: gameId,
-            player_id: player.id
-          });
+      const { data: game } = await supabase
+        .from("games")
+        .select("*")
+        .eq("id", gameId)
+        .maybeSingle();
+
+      if (!game) {
+        await bot.sendMessage(
+          chatId,
+          "❌ Game not found."
+        );
+        return;
+      }
+
+      if (!["waiting", "active"].includes(game.status)) {
+        await bot.sendMessage(
+          chatId,
+          "❌ This game is no longer available."
+        );
+        return;
+      }
+
+      const { error } = await supabase
+        .from("game_players")
+        .insert({
+          game_id: gameId,
+          player_id: player.id
+        });
 
       if (error) {
-        console.error("Join error:", error);
+        console.error(error);
 
         await bot.sendMessage(
           chatId,
@@ -358,50 +413,26 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      await bot.sendMessage(
-        chatId,
-        "✅ *You joined the Bingo game!*\n\n🃏 Your card will be generated next.",
-        {
-          parse_mode: "Markdown"
-        }
-      );
+      // Generate card
+      const cardData = generateBingoCard();
 
-      return;
-    }
+      const { error: cardError } = await supabase
+        .from("cards")
+        .insert({
+          game_id: gameId,
+          player_id: player.id,
+          card_data: cardData
+        });
 
-    // ============================
-    // MY CARD
-    // ============================
-
-    if (action === "my_card") {
-      const player = await registerPlayer(query);
-
-      if (!player) return;
-
-      const { data: card } =
-        await supabase
-          .from("cards")
-          .select("*")
-          .eq("player_id", player.id)
-          .order("id", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-      if (!card) {
-        await bot.sendMessage(
-          chatId,
-          "🃏 You don't have a Bingo card yet.\n\nJoin an active game first."
-        );
-        return;
+      if (cardError) {
+        console.error(cardError);
       }
 
       await bot.sendMessage(
         chatId,
-        `🃏 *Your Bingo Card*\n\n${JSON.stringify(
-          card.card_data,
-          null,
-          2
-        )}`,
+        `✅ *You joined Game #${gameId}!*\n\n` +
+        `🃏 Your Bingo card has been generated.\n\n` +
+        `Use *My Card* to view it.`,
         {
           parse_mode: "Markdown"
         }
@@ -410,29 +441,40 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    // ============================
-    // WALLET
-    // ============================
+    // ==================================================
+    // MY CARD
+    // ==================================================
 
-    if (action === "wallet") {
-      const player = await registerPlayer(query);
+    if (action === "my_card") {
+      const player = await registerPlayer(query.from);
 
       if (!player) return;
 
-      const { data: wallet } =
-        await supabase
-          .from("wallets")
-          .select("*")
-          .eq("player_id", player.id)
-          .maybeSingle();
+      const { data: card } = await supabase
+        .from("cards")
+        .select("*")
+        .eq("player_id", player.id)
+        .order("id", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-      const balance = wallet
-        ? wallet.balance
-        : 0;
+      if (!card) {
+        await bot.sendMessage(
+          chatId,
+          "🃏 You don't have a Bingo card yet.\n\nJoin a game first."
+        );
+        return;
+      }
+
+      const rows = card.card_data
+        .map(row => row.join(" | "))
+        .join("\n");
 
       await bot.sendMessage(
         chatId,
-        `💰 *My Wallet*\n\nBalance: ${balance}`,
+        `🃏 *YOUR BINGO CARD*\n\n` +
+        `B   I   N   G   O\n\n` +
+        rows,
         {
           parse_mode: "Markdown"
         }
@@ -441,21 +483,46 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    // ============================
-    // RESULTS
-    // ============================
+    // ==================================================
+    // WALLET
+    // ==================================================
 
-    if (action === "results") {
-      const player = await registerPlayer(query);
+    if (action === "wallet") {
+      const player = await registerPlayer(query.from);
 
       if (!player) return;
 
-      const { data: winners } =
-        await supabase
-          .from("winners")
-          .select("*")
-          .eq("player_id", player.id)
-          .order("id", { ascending: false });
+      const { data: wallet } = await supabase
+        .from("wallets")
+        .select("*")
+        .eq("player_id", player.id)
+        .maybeSingle();
+
+      await bot.sendMessage(
+        chatId,
+        `💰 *MY WALLET*\n\nBalance: ${wallet?.balance || 0}`,
+        {
+          parse_mode: "Markdown"
+        }
+      );
+
+      return;
+    }
+
+    // ==================================================
+    // RESULTS
+    // ==================================================
+
+    if (action === "results") {
+      const player = await registerPlayer(query.from);
+
+      if (!player) return;
+
+      const { data: winners } = await supabase
+        .from("winners")
+        .select("*")
+        .eq("player_id", player.id)
+        .order("id", { ascending: false });
 
       if (!winners || winners.length === 0) {
         await bot.sendMessage(
@@ -468,7 +535,7 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      let text = "🏆 *My Results*\n\n";
+      let text = "🏆 *MY RESULTS*\n\n";
 
       winners.forEach((winner, index) => {
         text += `${index + 1}. Game #${winner.game_id}\n`;
@@ -485,9 +552,9 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    // ============================
+    // ==================================================
     // ADMIN SECURITY
-    // ============================
+    // ==================================================
 
     if (
       action.startsWith("admin_") &&
@@ -503,23 +570,22 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    // ============================
+    // ==================================================
     // CREATE GAME
-    // ============================
+    // ==================================================
 
     if (action === "admin_create_game") {
-      const { data: game, error } =
-        await supabase
-          .from("games")
-          .insert({
-            status: "waiting",
-            entry_fee: 0
-          })
-          .select()
-          .single();
+      const { data: game, error } = await supabase
+        .from("games")
+        .insert({
+          status: "waiting",
+          entry_fee: 0
+        })
+        .select()
+        .single();
 
       if (error) {
-        console.error("Create game error:", error);
+        console.error(error);
 
         await bot.sendMessage(
           chatId,
@@ -530,7 +596,7 @@ bot.on("callback_query", async (query) => {
 
       await bot.sendMessage(
         chatId,
-        `✅ *Game Created Successfully!*\n\n` +
+        `✅ *GAME CREATED!*\n\n` +
         `🆔 Game ID: ${game.id}\n` +
         `📌 Status: ${game.status}\n` +
         `💰 Entry Fee: ${game.entry_fee}`,
@@ -542,19 +608,18 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    // ============================
+    // ==================================================
     // START GAME
-    // ============================
+    // ==================================================
 
     if (action === "admin_start_game") {
-      const { data: game } =
-        await supabase
-          .from("games")
-          .select("*")
-          .eq("status", "waiting")
-          .order("id", { ascending: false })
-          .limit(1)
-          .maybeSingle();
+      const { data: game } = await supabase
+        .from("games")
+        .select("*")
+        .eq("status", "waiting")
+        .order("id", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
       if (!game) {
         await bot.sendMessage(
@@ -564,13 +629,12 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      const { error } =
-        await supabase
-          .from("games")
-          .update({
-            status: "active"
-          })
-          .eq("id", game.id);
+      const { error } = await supabase
+        .from("games")
+        .update({
+          status: "active"
+        })
+        .eq("id", game.id);
 
       if (error) {
         await bot.sendMessage(
@@ -582,7 +646,7 @@ bot.on("callback_query", async (query) => {
 
       await bot.sendMessage(
         chatId,
-        `▶️ *Game Started!*\n\n🆔 Game ID: ${game.id}`,
+        `▶️ *GAME STARTED!*\n\nGame #${game.id}`,
         {
           parse_mode: "Markdown"
         }
@@ -591,19 +655,18 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    // ============================
-    // PAUSE GAME
-    // ============================
+    // ==================================================
+    // PAUSE
+    // ==================================================
 
     if (action === "admin_pause_game") {
-      const { data: game } =
-        await supabase
-          .from("games")
-          .select("*")
-          .eq("status", "active")
-          .order("id", { ascending: false })
-          .limit(1)
-          .maybeSingle();
+      const { data: game } = await supabase
+        .from("games")
+        .select("*")
+        .eq("status", "active")
+        .order("id", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
       if (!game) {
         await bot.sendMessage(
@@ -622,7 +685,7 @@ bot.on("callback_query", async (query) => {
 
       await bot.sendMessage(
         chatId,
-        "⏸️ *Game Paused*",
+        `⏸️ *GAME PAUSED*\n\nGame #${game.id}`,
         {
           parse_mode: "Markdown"
         }
@@ -631,34 +694,99 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    // ============================
+    // ==================================================
     // CALL NUMBER
-    // ============================
+    // ==================================================
 
     if (action === "admin_call_number") {
+      const { data: game } = await supabase
+        .from("games")
+        .select("*")
+        .eq("status", "active")
+        .order("id", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!game) {
+        await bot.sendMessage(
+          chatId,
+          "❌ No active game."
+        );
+        return;
+      }
+
+      const { data: called } = await supabase
+        .from("called_numbers")
+        .select("number")
+        .eq("game_id", game.id);
+
+      const usedNumbers =
+        (called || []).map(item => Number(item.number));
+
+      if (usedNumbers.length >= 75) {
+        await bot.sendMessage(
+          chatId,
+          "🛑 All 75 numbers have been called."
+        );
+        return;
+      }
+
+      let number;
+
+      do {
+        number = Math.floor(Math.random() * 75) + 1;
+      } while (usedNumbers.includes(number));
+
+      const { error } = await supabase
+        .from("called_numbers")
+        .insert({
+          game_id: game.id,
+          number
+        });
+
+      if (error) {
+        console.error(error);
+
+        await bot.sendMessage(
+          chatId,
+          "❌ Could not call number."
+        );
+        return;
+      }
+
+      let letter = "B";
+
+      if (number >= 16 && number <= 30) letter = "I";
+      if (number >= 31 && number <= 45) letter = "N";
+      if (number >= 46 && number <= 60) letter = "G";
+      if (number >= 61 && number <= 75) letter = "O";
+
       await bot.sendMessage(
         chatId,
-        "🔢 Number calling system is the next step."
+        `🔢 *NUMBER CALLED*\n\n🎱 *${letter}-${number}*`,
+        {
+          parse_mode: "Markdown"
+        }
       );
+
       return;
     }
 
-    // ============================
+    // ==================================================
     // PLAYERS
-    // ============================
+    // ==================================================
 
     if (action === "admin_players") {
-      const { count } =
-        await supabase
-          .from("players")
-          .select("*", {
-            count: "exact",
-            head: true
-          });
+      const { count } = await supabase
+        .from("players")
+        .select("*", {
+          count: "exact",
+          head: true
+        });
 
       await bot.sendMessage(
         chatId,
-        `👥 *Players*\n\nTotal registered players: ${count || 0}`,
+        `👥 *PLAYERS*\n\nTotal registered players: ${count || 0}`,
         {
           parse_mode: "Markdown"
         }
@@ -667,22 +795,21 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    // ============================
+    // ==================================================
     // WINNERS
-    // ============================
+    // ==================================================
 
     if (action === "admin_winners") {
-      const { count } =
-        await supabase
-          .from("winners")
-          .select("*", {
-            count: "exact",
-            head: true
-          });
+      const { count } = await supabase
+        .from("winners")
+        .select("*", {
+          count: "exact",
+          head: true
+        });
 
       await bot.sendMessage(
         chatId,
-        `🏆 *Winners*\n\nTotal winners: ${count || 0}`,
+        `🏆 *WINNERS*\n\nTotal winners: ${count || 0}`,
         {
           parse_mode: "Markdown"
         }
@@ -691,19 +818,22 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    // ============================
+    // ==================================================
     // END GAME
-    // ============================
+    // ==================================================
 
     if (action === "admin_end_game") {
-      const { data: game } =
-        await supabase
-          .from("games")
-          .select("*")
-          .in("status", ["waiting", "active", "paused"])
-          .order("id", { ascending: false })
-          .limit(1)
-          .maybeSingle();
+      const { data: game } = await supabase
+        .from("games")
+        .select("*")
+        .in("status", [
+          "waiting",
+          "active",
+          "paused"
+        ])
+        .order("id", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
       if (!game) {
         await bot.sendMessage(
@@ -722,7 +852,7 @@ bot.on("callback_query", async (query) => {
 
       await bot.sendMessage(
         chatId,
-        `🛑 *Game Ended*\n\nGame #${game.id}`,
+        `🛑 *GAME ENDED*\n\nGame #${game.id}`,
         {
           parse_mode: "Markdown"
         }
@@ -743,9 +873,9 @@ bot.on("callback_query", async (query) => {
   }
 });
 
-// ================================
+// ==================================================
 // ERRORS
-// ================================
+// ==================================================
 
 bot.on("polling_error", (error) => {
   console.error(
