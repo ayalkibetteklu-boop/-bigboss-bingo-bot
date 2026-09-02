@@ -136,15 +136,27 @@ function generateBingoCard() {
 // ==================================================
 
 function getBingoLetter(number) {
-  number = Number(number);
+  const n = Number(number);
 
-  if (number >= 1 && number <= 15) return "B";
-  if (number >= 16 && number <= 30) return "I";
-  if (number >= 31 && number <= 45) return "N";
-  if (number >= 46 && number <= 60) return "G";
-  if (number >= 61 && number <= 75) return "O";
+  if (n >= 1 && n <= 15) return "B";
+  if (n >= 16 && n <= 30) return "I";
+  if (n >= 31 && n <= 45) return "N";
+  if (n >= 46 && n <= 60) return "G";
+  if (n >= 61 && n <= 75) return "O";
 
   return "?";
+}
+
+// ==================================================
+// NORMALIZE CALLED NUMBERS
+// ==================================================
+
+function normalizeCalledNumbers(rows) {
+  return new Set(
+    (rows || [])
+      .map(row => Number(row.number))
+      .filter(number => Number.isInteger(number) && number >= 1 && number <= 75)
+  );
 }
 
 // ==================================================
@@ -152,17 +164,33 @@ function getBingoLetter(number) {
 // ==================================================
 
 function checkBingo(cardData, calledNumbers) {
-  const called = new Set(
-    calledNumbers.map(number => Number(number))
-  );
+  if (!Array.isArray(cardData) || cardData.length !== 5) {
+    return false;
+  }
 
-  const marked = cardData.map((row, rowIndex) =>
-    row.map((value, colIndex) => {
-      if (value === "FREE") return true;
+  const called = calledNumbers instanceof Set
+    ? calledNumbers
+    : new Set(
+        (calledNumbers || [])
+          .map(number => Number(number))
+          .filter(number => Number.isInteger(number))
+      );
 
-      return called.has(Number(value));
-    })
-  );
+  const marked = cardData.map(row => {
+    if (!Array.isArray(row) || row.length !== 5) {
+      return [false, false, false, false, false];
+    }
+
+    return row.map(value => {
+      if (String(value).toUpperCase() === "FREE") {
+        return true;
+      }
+
+      const number = Number(value);
+
+      return Number.isInteger(number) && called.has(number);
+    });
+  });
 
   // Rows
   for (let row = 0; row < 5; row++) {
@@ -219,20 +247,26 @@ function checkBingo(cardData, calledNumbers) {
 // ==================================================
 
 function formatCard(cardData, calledNumbers) {
-  const called = new Set(
-    calledNumbers.map(number => Number(number))
-  );
+  const called = calledNumbers instanceof Set
+    ? calledNumbers
+    : new Set(
+        (calledNumbers || [])
+          .map(number => Number(number))
+          .filter(number => Number.isInteger(number))
+      );
 
   return cardData
     .map(row => {
       return row
         .map(value => {
-          if (value === "FREE") {
+          if (String(value).toUpperCase() === "FREE") {
             return "🆓";
           }
 
-          if (called.has(Number(value))) {
-            return `✅${value}`;
+          const number = Number(value);
+
+          if (Number.isInteger(number) && called.has(number)) {
+            return `✅${number}`;
           }
 
           return String(value);
@@ -271,8 +305,7 @@ async function checkAllPlayersForBingo(gameId) {
     return null;
   }
 
-  const calledNumbers =
-    (calledRows || []).map(item => Number(item.number));
+  const calledNumbers = normalizeCalledNumbers(calledRows);
 
   for (const gamePlayer of gamePlayers) {
     const { data: card, error: cardError } = await supabase
@@ -284,7 +317,12 @@ async function checkAllPlayersForBingo(gameId) {
       .limit(1)
       .maybeSingle();
 
-    if (cardError || !card) {
+    if (cardError) {
+      console.error("Card lookup error:", cardError);
+      continue;
+    }
+
+    if (!card || !Array.isArray(card.card_data)) {
       continue;
     }
 
@@ -637,7 +675,6 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      // Generate and save card
       const cardData = generateBingoCard();
 
       const { error: cardError } = await supabase
@@ -651,7 +688,6 @@ bot.on("callback_query", async (query) => {
       if (cardError) {
         console.error("Card insert error:", cardError);
 
-        // Remove player from game if card creation failed
         await supabase
           .from("game_players")
           .delete()
@@ -687,13 +723,23 @@ bot.on("callback_query", async (query) => {
 
       if (!player) return;
 
-      const { data: card } = await supabase
+      const { data: card, error: cardError } = await supabase
         .from("cards")
         .select("*")
         .eq("player_id", player.id)
         .order("id", { ascending: false })
         .limit(1)
         .maybeSingle();
+
+      if (cardError) {
+        console.error("My Card error:", cardError);
+
+        await bot.sendMessage(
+          chatId,
+          "❌ Could not load your Bingo card."
+        );
+        return;
+      }
 
       if (!card) {
         await bot.sendMessage(
@@ -703,13 +749,22 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      const { data: calledRows } = await supabase
+      const { data: calledRows, error: calledError } = await supabase
         .from("called_numbers")
         .select("number")
         .eq("game_id", card.game_id);
 
-      const calledNumbers =
-        (calledRows || []).map(item => Number(item.number));
+      if (calledError) {
+        console.error("Called numbers error:", calledError);
+
+        await bot.sendMessage(
+          chatId,
+          "❌ Could not load called numbers."
+        );
+        return;
+      }
+
+      const calledNumbers = normalizeCalledNumbers(calledRows);
 
       const rows = formatCard(
         card.card_data,
@@ -974,13 +1029,24 @@ bot.on("callback_query", async (query) => {
         return;
       }
 
-      const { data: called } = await supabase
+      const { data: called, error: calledError } = await supabase
         .from("called_numbers")
         .select("number")
         .eq("game_id", game.id);
 
-      const usedNumbers =
-        (called || []).map(item => Number(item.number));
+      if (calledError) {
+        console.error("Load called numbers error:", calledError);
+
+        await bot.sendMessage(
+          chatId,
+          "❌ Could not load called numbers."
+        );
+        return;
+      }
+
+      const usedNumbers = Array.from(
+        normalizeCalledNumbers(called)
+      );
 
       if (usedNumbers.length >= 75) {
         await bot.sendMessage(
@@ -996,15 +1062,15 @@ bot.on("callback_query", async (query) => {
         number = Math.floor(Math.random() * 75) + 1;
       } while (usedNumbers.includes(number));
 
-      const { error } = await supabase
+      const { error: insertError } = await supabase
         .from("called_numbers")
         .insert({
           game_id: game.id,
           number
         });
 
-      if (error) {
-        console.error(error);
+      if (insertError) {
+        console.error("Call number insert error:", insertError);
 
         await bot.sendMessage(
           chatId,
